@@ -1,22 +1,14 @@
 import chess
 import random
 from typing import Optional
+from .evaluation import Evaluator
 
 class JamesFish:
     def __init__(self):
         self.board = chess.Board()
+        self.evaluator = Evaluator()
     
     def make_move(self, move: Optional[str] = None) -> str:
-        """
-        Make a move on the board. If a move is provided, make that move.
-        Otherwise, generate a legal move.
-        
-        Args:
-            move: Optional UCI format move string (e.g., 'e2e4')
-            
-        Returns:
-            str: The move made in UCI format
-        """
         if move:
             move_obj = chess.Move.from_uci(move)
             if move_obj in self.board.legal_moves:
@@ -24,23 +16,40 @@ class JamesFish:
                 return move
             raise ValueError(f"Illegal move: {move}")
         
-        # For now, just make a random legal move
-        legal_moves = list(self.board.legal_moves)
-        if not legal_moves:
-            raise ValueError("No legal moves available")
+        # For now, make the move that leads to the best evaluated position
+        best_move = None
+        best_eval = float('-inf') if self.board.turn else float('inf')
         
-        chosen_move = random.choice(legal_moves)
-        self.board.push(chosen_move)
-        return chosen_move.uci()
+        for move in self.board.legal_moves:
+            self.board.push(move)
+            eval = self.evaluator.evaluate(self.board)
+            self.board.pop()
+            
+            if self.board.turn:  # White to move
+                if eval > best_eval:
+                    best_eval = eval
+                    best_move = move
+            else:  # Black to move
+                if eval < best_eval:
+                    best_eval = eval
+                    best_move = move
+        
+        if best_move is None:
+            raise ValueError("No legal moves available")
+            
+        self.board.push(best_move)
+        return best_move.uci()
     
     def get_board_state(self) -> str:
-        """Return the current board state as a FEN string."""
         return self.board.fen()
+    
+    def get_position_evaluation(self) -> int:
+        return self.evaluator.evaluate(self.board)
 
 if __name__ == "__main__":
-    # Simple example usage
+    # Example usage showing evaluation
     engine = JamesFish()
-    print(f"Initial position: {engine.get_board_state()}")
+    print(f"Initial position evaluation: {engine.get_position_evaluation()}")
     move = engine.make_move()
     print(f"Made move: {move}")
-    print(f"New position: {engine.get_board_state()}")
+    print(f"New position evaluation: {engine.get_position_evaluation()}")
