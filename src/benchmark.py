@@ -1,6 +1,6 @@
 import chess
 import time
-from engine import JamesFish
+from .engine import JamesFish
 from typing import Dict, List
 
 def run_depth_benchmark(starting_fen: str = chess.STARTING_FEN, 
