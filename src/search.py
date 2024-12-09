@@ -12,11 +12,11 @@ class SearchEngine:
         self.best_move_found = None
         self.transposition_table = {}
         
-        # Pruning parameters
-        self.NULL_MOVE_R = 2  # Reduction factor for null move pruning
-        self.FUTILITY_MARGIN = 100  # Margin in centipawns
-        self.LMR_DEPTH = 3  # Minimum depth for late move reduction
-        self.LMR_MOVES = 4  # Number of moves before late move reduction
+        # More aggressive pruning parameters
+        self.NULL_MOVE_R = 3  # Increased from 2
+        self.FUTILITY_MARGIN = 80  # Decreased from 100
+        self.LMR_DEPTH = 2  # Decreased from 3
+        self.LMR_MOVES = 3  # Decreased from 4
         
     def should_stop_search(self) -> bool:
         return time.time() - self.start_time > self.max_time
@@ -42,8 +42,26 @@ class SearchEngine:
             
         return self.best_move_found, self.evaluator.evaluate(board)
 
+    def static_null_move_pruning(self, board: chess.Board, beta: float, depth: int) -> bool:
+        """Static null move pruning (also known as reverse futility pruning)"""
+        if depth < 3 or board.is_check():
+            return False
+        margin = 120 * depth
+        if self.evaluator.evaluate(board) - margin >= beta:
+            return True
+        return False
+
+    def reverse_futility_pruning(self, board: chess.Board, alpha: float, depth: int) -> bool:
+        """Reverse futility pruning"""
+        if depth < 3 or board.is_check():
+            return False
+        margin = 120 * depth
+        if self.evaluator.evaluate(board) + margin <= alpha:
+            return True
+        return False
+
     def negamax(self, board: chess.Board, depth: int, alpha: float, beta: float, is_root: bool = False) -> float:
-        """Negamax algorithm with various pruning techniques"""
+        """Negamax algorithm with enhanced pruning techniques"""
         self.nodes_searched += 1
         
         if self.should_stop_search():
@@ -59,12 +77,22 @@ class SearchEngine:
         original_alpha = alpha
         in_check = board.is_check()
         
+        # Static evaluation for pruning
+        static_eval = self.evaluator.evaluate(board)
+        
         # Base cases
         if depth <= 0 or board.is_game_over():
             return self.quiescence_search(board, alpha, beta)
             
+        # Static null move pruning
+        if self.static_null_move_pruning(board, beta, depth):
+            return beta
+            
+        # Reverse futility pruning
+        if self.reverse_futility_pruning(board, alpha, depth):
+            return alpha
+            
         # Null move pruning
-        # Skip if in check or at low depth to avoid horizon effect
         if depth >= 3 and not in_check and self.can_do_null_move(board):
             board.push(chess.Move.null())
             null_value = -self.negamax(board, depth - 1 - self.NULL_MOVE_R, -beta, -beta + 1)
@@ -74,17 +102,15 @@ class SearchEngine:
                 return beta
                 
         # Futility pruning preparation
-        futility_margin = self.FUTILITY_MARGIN * depth
+        futility_base = static_eval + self.FUTILITY_MARGIN
         do_futility = (
             depth <= 2 and 
             not in_check and 
             abs(beta) < 9000  # Not near mate scores
         )
         
-        if do_futility:
-            static_eval = self.evaluator.evaluate(board)
-            if static_eval - futility_margin >= beta:
-                return static_eval
+        if do_futility and futility_base <= alpha:
+            return futility_base
         
         # Move ordering
         moves = list(board.legal_moves)
@@ -97,24 +123,30 @@ class SearchEngine:
         for move in moves:
             moves_searched += 1
             
+            # Extended futility pruning
+            if (do_futility and moves_searched > 1 and 
+                not board.is_capture(move) and 
+                not board.gives_check(move)):
+                if futility_base <= alpha:
+                    continue
+                    
             # Late Move Reduction (LMR)
-            # Reduce search depth for later moves that are unlikely to be good
             if (depth >= self.LMR_DEPTH and
                 moves_searched >= self.LMR_MOVES and
                 not in_check and
                 not board.is_capture(move)):
-                reduction = 1
                 
-                # Do reduced depth search
+                # More aggressive reduction for later moves
+                reduction = 1 + (moves_searched > 6)
+                
                 board.push(move)
                 value = -self.negamax(board, depth - 1 - reduction, -beta, -alpha)
                 
-                # If the reduced search beats alpha, do a full-depth search
+                # Re-search if it might raise alpha
                 if value > alpha:
                     value = -self.negamax(board, depth - 1, -beta, -alpha)
                 board.pop()
             else:
-                # Normal search for early moves, captures, and checks
                 board.push(move)
                 value = -self.negamax(board, depth - 1, -beta, -alpha)
                 board.pop()
@@ -135,33 +167,34 @@ class SearchEngine:
         return best_value
 
     def can_do_null_move(self, board: chess.Board) -> bool:
-        """Determine if we can do a null move in this position"""
-        # Don't do null move if we don't have major pieces
-        # This prevents horizon effect in endgames
+        """More aggressive null move conditions"""
+        if board.is_check():
+            return False
+            
+        # Require fewer major pieces for null move
         major_pieces = 0
-        for piece_type in [chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT]:
+        for piece_type in [chess.QUEEN, chess.ROOK]:  # Only count queens and rooks
             major_pieces += len(board.pieces(piece_type, board.turn))
         return major_pieces > 0
 
     def quiescence_search(self, board: chess.Board, alpha: float, beta: float, depth: int = 4) -> float:
-        """Quiescence search with delta pruning"""
+        """Enhanced quiescence search with more aggressive delta pruning"""
         stand_pat = self.evaluator.evaluate(board)
         
         if stand_pat >= beta:
             return beta
         
-        # Delta pruning
-        DELTA_MARGIN = 200  # Big enough to catch most tactical sequences
+        # More aggressive delta pruning
+        DELTA_MARGIN = 150  # Reduced from 200
         if stand_pat < alpha - DELTA_MARGIN:
             return alpha
             
         alpha = max(alpha, stand_pat)
         
         for move in board.legal_moves:
-            if not board.is_capture(move):
+            if not board.is_capture(move) and not board.gives_check(move):
                 continue
                 
-            # Delta pruning at move level
             if not self.is_capture_worth_searching(board, move, alpha):
                 continue
                 
@@ -176,14 +209,13 @@ class SearchEngine:
         return alpha
 
     def is_capture_worth_searching(self, board: chess.Board, move: chess.Move, alpha: float) -> bool:
-        """Determine if a capture is worth searching in quiescence search"""
+        """More aggressive capture pruning"""
         victim_value = 0
         victim_piece = board.piece_at(move.to_square)
         if victim_piece:
             victim_value = self.evaluator.PIECE_VALUES[victim_piece.piece_type]
             
-        # If capturing a piece doesn't bring us close to alpha, skip it
-        if self.evaluator.evaluate(board) + victim_value + 200 < alpha:
+        if self.evaluator.evaluate(board) + victim_value + 150 < alpha:  # Reduced margin
             return False
             
         return True
