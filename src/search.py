@@ -8,7 +8,7 @@ class SearchEngine:
         self.evaluator = evaluator
         self.nodes_searched = 0
         self.start_time = 0
-        self.max_time = 0
+        self.max_time = min(30, 5 * (depth - 3))
         self.best_move_found = None
         self.transposition_table = {}
         
@@ -18,11 +18,11 @@ class SearchEngine:
         self.pv_line: List[Optional[chess.Move]] = [None] * 64  # Store principal variation
         
         # Search & pruning parameters
-        self.NULL_MOVE_R = 3
-        self.ASPIRATION_WINDOW = 50
-        self.FUTILITY_MARGIN = 80
+        self.NULL_MOVE_R = 2 + (depth >= 6)  # More reduction at deeper depths
+        self.ASPIRATION_WINDOW = 25
+        self.FUTILITY_MARGIN = 50
         self.DELTA_MARGIN = 150  # For delta pruning in quiescence
-        self.FULL_DEPTH_MOVES = 4
+        self.FULL_DEPTH_MOVES = 3
         self.REDUCTION_LIMIT = 3
         
     def clear_tables(self):
@@ -164,6 +164,9 @@ class SearchEngine:
         # Static evaluation for pruning
         static_eval = self.evaluator.evaluate(board)
         
+        # Initialize do_futility before the if block
+        do_futility = False
+
         # Various pruning techniques
         if not is_pv:
             # Static null move pruning
@@ -187,7 +190,7 @@ class SearchEngine:
             # Futility pruning preparation
             futility_base = static_eval + self.FUTILITY_MARGIN
             do_futility = (
-                depth <= 2 and 
+                depth <= 3 and 
                 not in_check and 
                 abs(beta) < 9000  # Not near mate scores
             )
@@ -220,7 +223,7 @@ class SearchEngine:
                     moves_searched > self.FULL_DEPTH_MOVES and 
                     not in_check and 
                     not board.is_capture(move)):
-                    reduction = 1 + (moves_searched > 6)
+                    reduction = 1 + (moves_searched > 6) + (depth >= 6)  # More aggressive at depth 6+
                     value = -self.negamax(board, depth - 1 - reduction, -(alpha + 1), -alpha, ply + 1, False)
                 else:
                     value = alpha + 1
