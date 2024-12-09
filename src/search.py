@@ -12,11 +12,100 @@ class SearchEngine:
         self.best_move_found = None
         self.transposition_table = {}
         
-        # More aggressive pruning parameters
-        self.NULL_MOVE_R = 3  # Increased from 2
-        self.FUTILITY_MARGIN = 80  # Decreased from 100
-        self.LMR_DEPTH = 2  # Decreased from 3
-        self.LMR_MOVES = 3  # Decreased from 4
+        # Move ordering tables
+        self.history_table: Dict[tuple, int] = {}  # (from_square, to_square): score
+        self.killer_moves: List[List[Optional[chess.Move]]] = [[None, None] for _ in range(128)]  # Two killer moves per ply
+        self.pv_table: List[List[Optional[chess.Move]]] = [[None for _ in range(64)] for _ in range(64)]
+        
+        # Pruning parameters
+        self.NULL_MOVE_R = 3
+        self.FUTILITY_MARGIN = 80
+        self.LMR_DEPTH = 2
+        self.LMR_MOVES = 3
+
+    def clear_tables(self):
+        """Clear move ordering tables between searches"""
+        self.history_table.clear()
+        self.killer_moves = [[None, None] for _ in range(128)]
+        self.pv_table = [[None for _ in range(64)] for _ in range(64)]
+        
+    def search(self, board: chess.Board, max_depth: int = 4, max_time: int = 30) -> Tuple[chess.Move, int]:
+        self.nodes_searched = 0
+        self.start_time = time.time()
+        self.max_time = max_time
+        self.best_move_found = None
+        self.clear_tables()
+        
+        alpha = float('-inf')
+        beta = float('inf')
+        
+        for current_depth in range(1, max_depth + 1):
+            try:
+                score = self.negamax(board, current_depth, alpha, beta, 0, True)
+                print(f"Depth {current_depth} completed. Best move: {self.best_move_found} Score: {score}")
+            except TimeoutError:
+                break
+                
+        if self.best_move_found is None:
+            self.best_move_found = list(board.legal_moves)[0]
+            
+        return self.best_move_found, self.evaluator.evaluate(board)
+
+    def get_move_score(self, board: chess.Board, move: chess.Move, ply: int) -> int:
+        """
+        Score a move for move ordering.
+        Higher scores will be searched first.
+        """
+        score = 0
+        from_square, to_square = move.from_square, move.to_square
+        
+        # 1. PV move (highest priority)
+        if self.pv_table[0][ply] == move:
+            return 20000
+            
+        # 2. Hash move from transposition table
+        board_hash = board.fen()
+        if board_hash in self.transposition_table:
+            stored_move = self.transposition_table[board_hash][2]  # Assuming we store move as third element
+            if stored_move == move:
+                return 19000
+        
+        # 3. Captures (MVV-LVA)
+        if board.is_capture(move):
+            attacker = board.piece_at(from_square)
+            victim = board.piece_at(to_square)
+            if attacker and victim:
+                score = 10000 + (victim.piece_type * 10 - attacker.piece_type)
+            return score
+            
+        # 4. Killer moves
+        if move in self.killer_moves[ply]:
+            return 9000 + (1000 if move == self.killer_moves[ply][0] else 0)
+            
+        # 5. History score
+        history_key = (from_square, to_square)
+        return self.history_table.get(history_key, 0)
+
+    def order_moves(self, board: chess.Board, moves: List[chess.Move], ply: int) -> List[chess.Move]:
+        """Sort moves based on their predicted strength"""
+        move_scores = [(move, self.get_move_score(board, move, ply)) for move in moves]
+        move_scores.sort(key=lambda x: x[1], reverse=True)
+        return [move for move, score in move_scores]
+
+    def update_history_score(self, move: chess.Move, depth: int):
+        """Update history heuristic scores"""
+        history_key = (move.from_square, move.to_square)
+        self.history_table[history_key] = self.history_table.get(history_key, 0) + depth * depth
+
+    def update_killer_moves(self, move: chess.Move, ply: int):
+        """Update killer moves for the current ply"""
+        if move != self.killer_moves[ply][0]:
+            self.killer_moves[ply][1] = self.killer_moves[ply][0]
+            self.killer_moves[ply][0] = move
+
+    def store_pv_move(self, move: chess.Move, ply: int, depth: int):
+        """Store principal variation move"""
+        self.pv_table[ply][depth] = move
         
     def should_stop_search(self) -> bool:
         return time.time() - self.start_time > self.max_time
@@ -60,27 +149,25 @@ class SearchEngine:
             return True
         return False
 
-    def negamax(self, board: chess.Board, depth: int, alpha: float, beta: float, is_root: bool = False) -> float:
-        """Negamax algorithm with enhanced pruning techniques"""
+    def negamax(self, board: chess.Board, depth: int, alpha: float, beta: float, ply: int, is_root: bool = False) -> float:
         self.nodes_searched += 1
         
         if self.should_stop_search():
             raise TimeoutError
             
-        # Check transposition table
+        # PV node handling
+        is_pv = beta > alpha + 1
+            
+        # Transposition table lookup
         board_hash = board.fen()
-        if board_hash in self.transposition_table:
-            stored_depth, stored_value = self.transposition_table[board_hash]
+        if not is_root and board_hash in self.transposition_table:
+            stored_depth, stored_value, stored_move = self.transposition_table[board_hash]
             if stored_depth >= depth:
                 return stored_value
                 
         original_alpha = alpha
         in_check = board.is_check()
         
-        # Static evaluation for pruning
-        static_eval = self.evaluator.evaluate(board)
-        
-        # Base cases
         if depth <= 0 or board.is_game_over():
             return self.quiescence_search(board, alpha, beta)
             
@@ -93,63 +180,46 @@ class SearchEngine:
             return alpha
             
         # Null move pruning
-        if depth >= 3 and not in_check and self.can_do_null_move(board):
+        if not is_pv and depth >= 3 and not in_check and self.can_do_null_move(board):
             board.push(chess.Move.null())
-            null_value = -self.negamax(board, depth - 1 - self.NULL_MOVE_R, -beta, -beta + 1)
+            null_value = -self.negamax(board, depth - 1 - self.NULL_MOVE_R, -beta, -beta + 1, ply + 1)
             board.pop()
             
             if null_value >= beta:
                 return beta
-                
-        # Futility pruning preparation
-        futility_base = static_eval + self.FUTILITY_MARGIN
-        do_futility = (
-            depth <= 2 and 
-            not in_check and 
-            abs(beta) < 9000  # Not near mate scores
-        )
         
-        if do_futility and futility_base <= alpha:
-            return futility_base
-        
-        # Move ordering
         moves = list(board.legal_moves)
-        moves.sort(key=lambda move: self._mvv_lva_score(board, move), reverse=True)
+        moves = self.order_moves(board, moves, ply)
         
         best_value = float('-inf')
         best_move = None
-        moves_searched = 0
         
-        for move in moves:
-            moves_searched += 1
+        for move_index, move in enumerate(moves):
+            is_capture = board.is_capture(move)
+            gives_check = board.gives_check(move)
             
-            # Extended futility pruning
-            if (do_futility and moves_searched > 1 and 
-                not board.is_capture(move) and 
-                not board.gives_check(move)):
-                if futility_base <= alpha:
-                    continue
-                    
-            # Late Move Reduction (LMR)
-            if (depth >= self.LMR_DEPTH and
-                moves_searched >= self.LMR_MOVES and
+            # Late Move Reduction
+            do_lmr = (
+                depth >= self.LMR_DEPTH and
+                move_index >= self.LMR_MOVES and
                 not in_check and
-                not board.is_capture(move)):
-                
-                # More aggressive reduction for later moves
-                reduction = 1 + (moves_searched > 6)
-                
-                board.push(move)
-                value = -self.negamax(board, depth - 1 - reduction, -beta, -alpha)
-                
-                # Re-search if it might raise alpha
-                if value > alpha:
-                    value = -self.negamax(board, depth - 1, -beta, -alpha)
-                board.pop()
+                not is_capture and
+                not gives_check and
+                not is_pv
+            )
+            
+            board.push(move)
+            
+            # Decide search depth
+            if do_lmr:
+                reduction = 1 + (move_index > 6)
+                value = -self.negamax(board, depth - 1 - reduction, -beta, -alpha, ply + 1)
+                if value > alpha:  # Re-search if promising
+                    value = -self.negamax(board, depth - 1, -beta, -alpha, ply + 1)
             else:
-                board.push(move)
-                value = -self.negamax(board, depth - 1, -beta, -alpha)
-                board.pop()
+                value = -self.negamax(board, depth - 1, -beta, -alpha, ply + 1)
+                
+            board.pop()
             
             if value > best_value:
                 best_value = value
@@ -158,11 +228,20 @@ class SearchEngine:
                     self.best_move_found = move
                     
             alpha = max(alpha, value)
+            
             if alpha >= beta:
-                break  # Beta cutoff
+                # Update killer moves and history for quiet moves
+                if not is_capture:
+                    self.update_killer_moves(move, ply)
+                    self.update_history_score(move, depth)
+                break
                 
+        # Store PV move
+        if best_move:
+            self.store_pv_move(best_move, ply, depth)
+            
         # Store in transposition table
-        self.transposition_table[board_hash] = (depth, best_value)
+        self.transposition_table[board_hash] = (depth, best_value, best_move)
         
         return best_value
 
