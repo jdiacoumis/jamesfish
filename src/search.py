@@ -1,5 +1,5 @@
 import chess
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, List
 from .evaluation import Evaluator
 import time
 
@@ -14,125 +14,77 @@ class SearchEngine:
         
         # Move ordering tables
         self.history_table: Dict[tuple, int] = {}  # (from_square, to_square): score
-        self.killer_moves: List[List[Optional[chess.Move]]] = [[None, None] for _ in range(128)]  # Two killer moves per ply
-        self.pv_table: List[List[Optional[chess.Move]]] = [[None for _ in range(64)] for _ in range(64)]
+        self.killer_moves: List[Optional[chess.Move]] = [None] * 128  # One killer move per ply
+        self.pv_line: List[Optional[chess.Move]] = [None] * 64  # Store principal variation
         
-        # Pruning parameters
+        # Search & pruning parameters
         self.NULL_MOVE_R = 3
+        self.ASPIRATION_WINDOW = 50
         self.FUTILITY_MARGIN = 80
-        self.LMR_DEPTH = 2
-        self.LMR_MOVES = 3
-
+        self.DELTA_MARGIN = 150  # For delta pruning in quiescence
+        self.FULL_DEPTH_MOVES = 4
+        self.REDUCTION_LIMIT = 3
+        
     def clear_tables(self):
         """Clear move ordering tables between searches"""
         self.history_table.clear()
-        self.killer_moves = [[None, None] for _ in range(128)]
-        self.pv_table = [[None for _ in range(64)] for _ in range(64)]
-        
+        self.killer_moves = [None] * 128
+        self.pv_line = [None] * 64
+
+    def should_stop_search(self) -> bool:
+        """Check if we should stop searching based on time"""
+        return time.time() - self.start_time > self.max_time
+
     def search(self, board: chess.Board, max_depth: int = 4, max_time: int = 30) -> Tuple[chess.Move, int]:
+        """Main search function with aspiration windows"""
         self.nodes_searched = 0
         self.start_time = time.time()
         self.max_time = max_time
         self.best_move_found = None
         self.clear_tables()
         
-        alpha = float('-inf')
-        beta = float('inf')
-        
-        for current_depth in range(1, max_depth + 1):
+        previous_score = 0
+        for depth in range(1, max_depth + 1):
             try:
-                score = self.negamax(board, current_depth, alpha, beta, 0, True)
-                print(f"Depth {current_depth} completed. Best move: {self.best_move_found} Score: {score}")
+                # Use aspiration windows after depth 3
+                if depth >= 4:
+                    alpha = previous_score - self.ASPIRATION_WINDOW
+                    beta = previous_score + self.ASPIRATION_WINDOW
+                    score = self._search_with_aspiration(board, depth, alpha, beta)
+                else:
+                    # Full window for early depths
+                    score = self.negamax(board, depth, -30000, 30000, 0, True)
+                    
+                if self.should_stop_search():
+                    break
+                    
+                previous_score = score
+                print(f"Depth {depth} completed. Best move: {self.best_move_found} Score: {score}")
             except TimeoutError:
                 break
-                
+            
         if self.best_move_found is None:
             self.best_move_found = list(board.legal_moves)[0]
             
-        return self.best_move_found, self.evaluator.evaluate(board)
+        return self.best_move_found, previous_score
 
-    def get_move_score(self, board: chess.Board, move: chess.Move, ply: int) -> int:
-        """
-        Score a move for move ordering.
-        Higher scores will be searched first.
-        """
-        score = 0
-        from_square, to_square = move.from_square, move.to_square
-        
-        # 1. PV move (highest priority)
-        if self.pv_table[0][ply] == move:
-            return 20000
+    def _search_with_aspiration(self, board: chess.Board, depth: int, alpha: int, beta: int) -> int:
+        """Search with aspiration windows, widening if score falls outside window"""
+        while True:
+            score = self.negamax(board, depth, alpha, beta, 0, True)
             
-        # 2. Hash move from transposition table
-        board_hash = board.fen()
-        if board_hash in self.transposition_table:
-            stored_move = self.transposition_table[board_hash][2]  # Assuming we store move as third element
-            if stored_move == move:
-                return 19000
-        
-        # 3. Captures (MVV-LVA)
-        if board.is_capture(move):
-            attacker = board.piece_at(from_square)
-            victim = board.piece_at(to_square)
-            if attacker and victim:
-                score = 10000 + (victim.piece_type * 10 - attacker.piece_type)
-            return score
-            
-        # 4. Killer moves
-        if move in self.killer_moves[ply]:
-            return 9000 + (1000 if move == self.killer_moves[ply][0] else 0)
-            
-        # 5. History score
-        history_key = (from_square, to_square)
-        return self.history_table.get(history_key, 0)
-
-    def order_moves(self, board: chess.Board, moves: List[chess.Move], ply: int) -> List[chess.Move]:
-        """Sort moves based on their predicted strength"""
-        move_scores = [(move, self.get_move_score(board, move, ply)) for move in moves]
-        move_scores.sort(key=lambda x: x[1], reverse=True)
-        return [move for move, score in move_scores]
-
-    def update_history_score(self, move: chess.Move, depth: int):
-        """Update history heuristic scores"""
-        history_key = (move.from_square, move.to_square)
-        self.history_table[history_key] = self.history_table.get(history_key, 0) + depth * depth
-
-    def update_killer_moves(self, move: chess.Move, ply: int):
-        """Update killer moves for the current ply"""
-        if move != self.killer_moves[ply][0]:
-            self.killer_moves[ply][1] = self.killer_moves[ply][0]
-            self.killer_moves[ply][0] = move
-
-    def store_pv_move(self, move: chess.Move, ply: int, depth: int):
-        """Store principal variation move"""
-        self.pv_table[ply][depth] = move
-        
-    def should_stop_search(self) -> bool:
-        return time.time() - self.start_time > self.max_time
-
-    def search(self, board: chess.Board, max_depth: int = 4, max_time: int = 30) -> Tuple[chess.Move, int]:
-        self.nodes_searched = 0
-        self.start_time = time.time()
-        self.max_time = max_time
-        self.best_move_found = None
-        
-        alpha = float('-inf')
-        beta = float('inf')
-        
-        for current_depth in range(1, max_depth + 1):
-            try:
-                score = self.negamax(board, current_depth, alpha, beta, True)
-                print(f"Depth {current_depth} completed. Best move: {self.best_move_found} Score: {score}")
-            except TimeoutError:
-                break
+            # Score within window, return it
+            if alpha < score < beta:
+                return score
                 
-        if self.best_move_found is None:
-            self.best_move_found = list(board.legal_moves)[0]
-            
-        return self.best_move_found, self.evaluator.evaluate(board)
+            # Score outside window, widen and retry
+            if score <= alpha:
+                alpha = max(-30000, alpha - self.ASPIRATION_WINDOW)
+            else:
+                beta = min(30000, beta + self.ASPIRATION_WINDOW)
 
     def static_null_move_pruning(self, board: chess.Board, beta: float, depth: int) -> bool:
-        """Static null move pruning (also known as reverse futility pruning)"""
+        """Static null move pruning (reverse futility pruning)"""
         if depth < 3 or board.is_check():
             return False
         margin = 120 * depth
@@ -149,136 +101,191 @@ class SearchEngine:
             return True
         return False
 
-    def negamax(self, board: chess.Board, depth: int, alpha: float, beta: float, ply: int, is_root: bool = False) -> float:
+    def get_move_score(self, board: chess.Board, move: chess.Move, ply: int) -> int:
+        """Fast move scoring for move ordering"""
+        # PV move (highest priority)
+        if ply == 0 and self.pv_line[0] == move:
+            return 30000
+        
+        # Hash move from transposition table
+        board_hash = board.fen()
+        if board_hash in self.transposition_table:
+            stored_depth, _, stored_move = self.transposition_table[board_hash]
+            if stored_move == move:
+                return 25000
+        
+        # Captures
+        if board.is_capture(move):
+            victim = board.piece_at(move.to_square)
+            attacker = board.piece_at(move.from_square)
+            if victim and attacker:
+                return 20000 + (victim.piece_type * 6 - attacker.piece_type)
+            return 20000
+            
+        # Killer move
+        if self.killer_moves[ply] == move:
+            return 10000
+            
+        # History score
+        return self.history_table.get((move.from_square, move.to_square), 0)
+
+    def has_non_pawn_material(self, board: chess.Board, color: bool) -> bool:
+        """Check if side has any pieces besides pawns and king"""
+        for piece_type in [chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT]:
+            if any(board.pieces(piece_type, color)):
+                return True
+        return False
+
+    def negamax(self, board: chess.Board, depth: int, alpha: float, beta: float, ply: int, is_pv: bool = False) -> float:
+        """Negamax algorithm with PVS and all pruning techniques"""
         self.nodes_searched += 1
         
         if self.should_stop_search():
             raise TimeoutError
             
-        # PV node handling
-        is_pv = beta > alpha + 1
+        # Quick checks for draws
+        if board.is_repetition(2) or board.halfmove_clock >= 100:
+            return 0
             
-        # Transposition table lookup
+        alpha_original = alpha
+        in_check = board.is_check()
+        
+        # Base cases
+        if depth <= 0 or board.is_game_over():
+            return self.quiescence_search(board, alpha, beta)
+        
+        # Retrieve from transposition table
         board_hash = board.fen()
-        if not is_root and board_hash in self.transposition_table:
-            stored_depth, stored_value, stored_move = self.transposition_table[board_hash]
+        if not is_pv and board_hash in self.transposition_table:
+            stored_depth, stored_value, _ = self.transposition_table[board_hash]
             if stored_depth >= depth:
                 return stored_value
                 
-        original_alpha = alpha
-        in_check = board.is_check()
+        # Static evaluation for pruning
+        static_eval = self.evaluator.evaluate(board)
         
-        if depth <= 0 or board.is_game_over():
-            return self.quiescence_search(board, alpha, beta)
-            
-        # Static null move pruning
-        if self.static_null_move_pruning(board, beta, depth):
-            return beta
-            
-        # Reverse futility pruning
-        if self.reverse_futility_pruning(board, alpha, depth):
-            return alpha
-            
-        # Null move pruning
-        if not is_pv and depth >= 3 and not in_check and self.can_do_null_move(board):
-            board.push(chess.Move.null())
-            null_value = -self.negamax(board, depth - 1 - self.NULL_MOVE_R, -beta, -beta + 1, ply + 1)
-            board.pop()
-            
-            if null_value >= beta:
+        # Various pruning techniques
+        if not is_pv:
+            # Static null move pruning
+            if self.static_null_move_pruning(board, beta, depth):
                 return beta
-        
-        moves = list(board.legal_moves)
-        moves = self.order_moves(board, moves, ply)
-        
-        best_value = float('-inf')
-        best_move = None
-        
-        for move_index, move in enumerate(moves):
-            is_capture = board.is_capture(move)
-            gives_check = board.gives_check(move)
+                
+            # Reverse futility pruning
+            if self.reverse_futility_pruning(board, alpha, depth):
+                return alpha
+                
+            # Null move pruning
+            if (depth >= 3 and not in_check and 
+                self.has_non_pawn_material(board, board.turn)):
+                board.push(chess.Move.null())
+                value = -self.negamax(board, depth - 1 - self.NULL_MOVE_R, -beta, -beta + 1, ply + 1)
+                board.pop()
+                
+                if value >= beta:
+                    return beta
             
-            # Late Move Reduction
-            do_lmr = (
-                depth >= self.LMR_DEPTH and
-                move_index >= self.LMR_MOVES and
-                not in_check and
-                not is_capture and
-                not gives_check and
-                not is_pv
+            # Futility pruning preparation
+            futility_base = static_eval + self.FUTILITY_MARGIN
+            do_futility = (
+                depth <= 2 and 
+                not in_check and 
+                abs(beta) < 9000  # Not near mate scores
             )
+                
+        moves = list(board.legal_moves)
+        moves.sort(key=lambda m: self.get_move_score(board, m, ply), reverse=True)
+        
+        best_move = None
+        best_value = float('-inf')
+        moves_searched = 0
+        
+        # Principal Variation Search
+        for move in moves:
+            moves_searched += 1
+            
+            # Futility pruning
+            if (do_futility and moves_searched > 1 and 
+                not board.is_capture(move) and not board.gives_check(move)):
+                if futility_base <= alpha:
+                    continue
             
             board.push(move)
             
-            # Decide search depth
-            if do_lmr:
-                reduction = 1 + (move_index > 6)
-                value = -self.negamax(board, depth - 1 - reduction, -beta, -alpha, ply + 1)
-                if value > alpha:  # Re-search if promising
-                    value = -self.negamax(board, depth - 1, -beta, -alpha, ply + 1)
+            # PVS logic
+            if moves_searched == 1:
+                value = -self.negamax(board, depth - 1, -beta, -alpha, ply + 1, is_pv)
             else:
-                value = -self.negamax(board, depth - 1, -beta, -alpha, ply + 1)
+                # Late move reductions
+                if (depth >= self.REDUCTION_LIMIT and 
+                    moves_searched > self.FULL_DEPTH_MOVES and 
+                    not in_check and 
+                    not board.is_capture(move)):
+                    reduction = 1 + (moves_searched > 6)
+                    value = -self.negamax(board, depth - 1 - reduction, -(alpha + 1), -alpha, ply + 1, False)
+                else:
+                    value = alpha + 1
+                
+                # PVS re-search if promising
+                if value > alpha:
+                    value = -self.negamax(board, depth - 1, -(alpha + 1), -alpha, ply + 1, False)
+                    if value > alpha and value < beta:
+                        value = -self.negamax(board, depth - 1, -beta, -alpha, ply + 1, False)
                 
             board.pop()
             
             if value > best_value:
                 best_value = value
                 best_move = move
-                if is_root:
-                    self.best_move_found = move
+                
+                if value > alpha:
+                    alpha = value
+                    if ply == 0:
+                        self.best_move_found = move
+                        self.pv_line[0] = move
                     
-            alpha = max(alpha, value)
-            
             if alpha >= beta:
                 # Update killer moves and history for quiet moves
-                if not is_capture:
-                    self.update_killer_moves(move, ply)
-                    self.update_history_score(move, depth)
+                if not board.is_capture(move):
+                    self.killer_moves[ply] = move
+                    self.history_table[(move.from_square, move.to_square)] = (
+                        self.history_table.get((move.from_square, move.to_square), 0) + depth * depth
+                    )
                 break
-                
-        # Store PV move
-        if best_move:
-            self.store_pv_move(best_move, ply, depth)
-            
+        
         # Store in transposition table
         self.transposition_table[board_hash] = (depth, best_value, best_move)
         
         return best_value
 
-    def can_do_null_move(self, board: chess.Board) -> bool:
-        """More aggressive null move conditions"""
-        if board.is_check():
-            return False
-            
-        # Require fewer major pieces for null move
-        major_pieces = 0
-        for piece_type in [chess.QUEEN, chess.ROOK]:  # Only count queens and rooks
-            major_pieces += len(board.pieces(piece_type, board.turn))
-        return major_pieces > 0
-
-    def quiescence_search(self, board: chess.Board, alpha: float, beta: float, depth: int = 4) -> float:
-        """Enhanced quiescence search with more aggressive delta pruning"""
+    def quiescence_search(self, board: chess.Board, alpha: float, beta: float) -> float:
+        """Quiescence search with delta pruning"""
+        self.nodes_searched += 1
+        
         stand_pat = self.evaluator.evaluate(board)
         
         if stand_pat >= beta:
             return beta
-        
-        # More aggressive delta pruning
-        DELTA_MARGIN = 150  # Reduced from 200
-        if stand_pat < alpha - DELTA_MARGIN:
+            
+        # Delta pruning
+        if stand_pat < alpha - self.DELTA_MARGIN:
             return alpha
             
         alpha = max(alpha, stand_pat)
         
-        for move in board.legal_moves:
-            if not board.is_capture(move) and not board.gives_check(move):
-                continue
-                
-            if not self.is_capture_worth_searching(board, move, alpha):
-                continue
-                
+        # Only look at captures and checks
+        captures = [move for move in board.legal_moves if board.is_capture(move) or board.gives_check(move)]
+        captures.sort(key=lambda m: self.get_move_score(board, m, 0), reverse=True)
+        
+        for move in captures:
+            # Delta pruning at move level
+            if not board.gives_check(move):
+                victim = board.piece_at(move.to_square)
+                if victim:
+                    if stand_pat + self.evaluator.PIECE_VALUES[victim.piece_type] + 200 < alpha:
+                        continue
+            
             board.push(move)
-            score = -self.quiescence_search(board, -beta, -alpha, depth - 1)
+            score = -self.quiescence_search(board, -beta, -alpha)
             board.pop()
             
             if score >= beta:
@@ -286,30 +293,3 @@ class SearchEngine:
             alpha = max(alpha, score)
                 
         return alpha
-
-    def is_capture_worth_searching(self, board: chess.Board, move: chess.Move, alpha: float) -> bool:
-        """More aggressive capture pruning"""
-        victim_value = 0
-        victim_piece = board.piece_at(move.to_square)
-        if victim_piece:
-            victim_value = self.evaluator.PIECE_VALUES[victim_piece.piece_type]
-            
-        if self.evaluator.evaluate(board) + victim_value + 150 < alpha:  # Reduced margin
-            return False
-            
-        return True
-
-    def _mvv_lva_score(self, board: chess.Board, move: chess.Move) -> int:
-        if not board.is_capture(move):
-            return 0
-            
-        attacker = board.piece_at(move.from_square)
-        victim = board.piece_at(move.to_square)
-        
-        if attacker is None or victim is None:
-            return 0
-            
-        attacker_value = self.evaluator.PIECE_VALUES[attacker.piece_type]
-        victim_value = self.evaluator.PIECE_VALUES[victim.piece_type]
-        
-        return victim_value - (attacker_value / 100)
