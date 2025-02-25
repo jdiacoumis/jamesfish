@@ -37,7 +37,7 @@ class Evaluator:
     }
     
     # Maximum phase value (full board)
-    TOTAL_PHASE = 16 * 1 + 4 * 2 + 2 * 4  # 16 pawns + 4 rooks + 2 queens = 24
+    TOTAL_PHASE = 16 * 0 + 4 * 1 + 4 * 1 + 4 * 2 + 2 * 4  # 16 pawns + 4 knights + 4 bishops + 4 rooks + 2 queens = 24
     
     # Bonuses and penalties
     CENTER_CONTROL_BONUS = 10
@@ -322,14 +322,20 @@ class Evaluator:
         mg_score += self._evaluate_development(board) * 1.5  # Very important in opening/midgame
         eg_score += 0  # Not relevant in endgame
         
-        # Tempo bonus
-        mg_score += self.TEMPO_BONUS
-        eg_score += self.TEMPO_BONUS * 2  # More important in endgame
+        # Tempo bonus - only added when we're returning the score from the perspective
+        # of the side to move, so we'll add it later
+        tempo_bonus = self.TEMPO_BONUS + (self.TEMPO_BONUS * phase)
         
         # Interpolate between midgame and endgame scores based on phase
         score = self._interpolate_score(mg_score, eg_score, phase)
         
-        return score if board.turn else -score
+        # Add tempo bonus and adjust for the side to move
+        if board.turn == chess.WHITE:
+            score += tempo_bonus
+        else:
+            score = -score - tempo_bonus
+            
+        return score
     
     def _calculate_game_phase(self, board: chess.Board) -> float:
         """
@@ -374,7 +380,7 @@ class Evaluator:
             board: Current chess position
             
         Returns:
-            int: Material balance in centipawns
+            int: Material balance in centipawns (positive = white advantage)
         """
         score = 0
         for piece_type in chess.PIECE_TYPES:
@@ -400,7 +406,7 @@ class Evaluator:
             phase: Game phase between 0.0 (middlegame) and 1.0 (endgame)
             
         Returns:
-            int: Score for piece positioning
+            int: Score for piece positioning (positive = white advantage)
         """
         score = 0
         for square in chess.SQUARES:
@@ -409,7 +415,7 @@ class Evaluator:
                 continue
                 
             # Get square index from white's perspective
-            square_idx = square if piece.color else chess.square_mirror(square)
+            square_idx = square if piece.color == chess.WHITE else chess.square_mirror(square)
             
             piece_type = piece.piece_type
             mg_value = 0
@@ -437,7 +443,12 @@ class Evaluator:
             
             # Interpolate between midgame and endgame values
             value = int(mg_value * (1.0 - phase) + eg_value * phase)
-            score += value if piece.color else -value
+            
+            # Add to score (positive for white, negative for black)
+            if piece.color == chess.WHITE:
+                score += value
+            else:
+                score -= value
             
         return score
     
@@ -449,7 +460,7 @@ class Evaluator:
             board: Current chess position
             
         Returns:
-            int: Score for king safety
+            int: Score for king safety (positive = white advantage)
         """
         score = 0
         
@@ -500,7 +511,11 @@ class Evaluator:
             elif king_file_semi_open:
                 safety += self.KING_OPEN_FILE_PENALTY // 2
             
-            score += safety if color else -safety
+            # Add to score (positive for white, negative for black)
+            if color == chess.WHITE:
+                score += safety
+            else:
+                score -= safety
             
         return score
     
@@ -513,7 +528,7 @@ class Evaluator:
             phase: Game phase between 0.0 (middlegame) and 1.0 (endgame)
             
         Returns:
-            int: Score for pawn structure
+            int: Score for pawn structure (positive = white advantage)
         """
         score = 0
         pawn_files = {chess.WHITE: [0] * 8, chess.BLACK: [0] * 8}
@@ -528,7 +543,7 @@ class Evaluator:
                 
                 pawn_files[piece.color][file_idx] += 1
                 pawn_ranks[piece.color][file_idx] = max(pawn_ranks[piece.color][file_idx], 
-                                                      rank_idx if piece.color else 7 - rank_idx)
+                                                      rank_idx if piece.color == chess.WHITE else 7 - rank_idx)
                 
                 # Handle doubled pawns
                 if pawn_files[piece.color][file_idx] > 1:
@@ -536,7 +551,12 @@ class Evaluator:
                     # Doubled pawns are worse in the endgame
                     if phase > 0.5:
                         doubled_penalty = int(doubled_penalty * 1.5)
-                    score += doubled_penalty if piece.color else -doubled_penalty
+                    
+                    # Add penalty (negative for both colors)
+                    if piece.color == chess.WHITE:
+                        score += doubled_penalty
+                    else:
+                        score -= doubled_penalty
                 
                 # Check for passed pawns
                 is_passed = True
@@ -551,15 +571,19 @@ class Evaluator:
                     passed_bonus = self.PASSED_PAWN_BONUS
                     
                     # Passed pawns are more valuable in endgame and when further advanced
-                    rank_factor = rank_idx if piece.color else 7 - rank_idx
+                    rank_factor = rank_idx if piece.color == chess.WHITE else 7 - rank_idx
                     passed_bonus += passed_bonus * rank_factor // 6
                     
                     # Increase bonus in endgame
                     passed_bonus = int(passed_bonus * (1.0 + phase))
                     
-                    score += passed_bonus if piece.color else -passed_bonus
+                    # Add bonus (positive for white, negative for black)
+                    if piece.color == chess.WHITE:
+                        score += passed_bonus
+                    else:
+                        score -= passed_bonus
         
-        # Check for isolated pawns
+        # Check for isolated pawns and pawn chains
         for color in [chess.WHITE, chess.BLACK]:
             for file_idx in range(8):
                 if pawn_files[color][file_idx] > 0:
@@ -575,11 +599,20 @@ class Evaluator:
                         # Isolated pawns are worse in the endgame
                         if phase > 0.5:
                             isolated_penalty = int(isolated_penalty * 1.5)
-                        score += isolated_penalty if color else -isolated_penalty
+                        
+                        # Add penalty (negative for both colors)
+                        if color == chess.WHITE:
+                            score += isolated_penalty
+                        else:
+                            score -= isolated_penalty
                     
                     # Pawn chains check
                     if file_idx < 7 and pawn_files[color][file_idx + 1] > 0:
-                        score += self.PAWN_CHAIN_BONUS if color else -self.PAWN_CHAIN_BONUS
+                        # Add bonus (positive for white, negative for black)
+                        if color == chess.WHITE:
+                            score += self.PAWN_CHAIN_BONUS
+                        else:
+                            score -= self.PAWN_CHAIN_BONUS
         
         return score
     
@@ -591,13 +624,18 @@ class Evaluator:
             board: Current chess position
             
         Returns:
-            int: Score for bishop pair bonus
+            int: Score for bishop pair bonus (positive = white advantage)
         """
         score = 0
-        for color in [chess.WHITE, chess.BLACK]:
-            bishop_count = len(board.pieces(chess.BISHOP, color))
-            if bishop_count >= 2:
-                score += self.BISHOP_PAIR_BONUS if color else -self.BISHOP_PAIR_BONUS
+        
+        # Check for white bishop pair
+        if len(board.pieces(chess.BISHOP, chess.WHITE)) >= 2:
+            score += self.BISHOP_PAIR_BONUS
+            
+        # Check for black bishop pair
+        if len(board.pieces(chess.BISHOP, chess.BLACK)) >= 2:
+            score -= self.BISHOP_PAIR_BONUS
+            
         return score
     
     def _evaluate_rook_placement(self, board: chess.Board) -> int:
@@ -608,7 +646,7 @@ class Evaluator:
             board: Current chess position
             
         Returns:
-            int: Score for rook placement
+            int: Score for rook placement (positive = white advantage)
         """
         score = 0
         
@@ -621,7 +659,7 @@ class Evaluator:
                 # Check if rook is on 7th rank (relative to color)
                 if (piece.color == chess.WHITE and rank_idx == 6) or \
                    (piece.color == chess.BLACK and rank_idx == 1):
-                    score += self.ROOK_ON_SEVENTH_BONUS if piece.color else -self.ROOK_ON_SEVENTH_BONUS
+                    score += self.ROOK_ON_SEVENTH_BONUS if piece.color == chess.WHITE else -self.ROOK_ON_SEVENTH_BONUS
                 
                 # Check if file is completely open
                 file_is_open = True
@@ -633,7 +671,7 @@ class Evaluator:
                         break
                 
                 if file_is_open:
-                    score += self.ROOK_OPEN_FILE_BONUS if piece.color else -self.ROOK_OPEN_FILE_BONUS
+                    score += self.ROOK_OPEN_FILE_BONUS if piece.color == chess.WHITE else -self.ROOK_OPEN_FILE_BONUS
                 else:
                     # Check if file is semi-open (no friendly pawns)
                     file_is_semi_open = True
@@ -647,7 +685,7 @@ class Evaluator:
                             break
                     
                     if file_is_semi_open:
-                        score += self.ROOK_SEMI_OPEN_FILE_BONUS if piece.color else -self.ROOK_SEMI_OPEN_FILE_BONUS
+                        score += self.ROOK_SEMI_OPEN_FILE_BONUS if piece.color == chess.WHITE else -self.ROOK_SEMI_OPEN_FILE_BONUS
         
         return score
     
@@ -659,32 +697,26 @@ class Evaluator:
             board: Current chess position
             
         Returns:
-            int: Score for piece mobility
+            int: Score for piece mobility (positive = white advantage)
         """
         original_turn = board.turn
-        
-        # Save the current state of the castling rights
-        white_kingside = board.has_kingside_castling_rights(chess.WHITE)
-        white_queenside = board.has_queenside_castling_rights(chess.WHITE)
-        black_kingside = board.has_kingside_castling_rights(chess.BLACK)
-        black_queenside = board.has_queenside_castling_rights(chess.BLACK)
         
         # Create a temporary board copy for move generation
         board_copy = board.copy()
         
         # Calculate white's moves
         board_copy.turn = chess.WHITE
-        white_moves = list(board_copy.legal_moves)
+        white_moves = len(list(board_copy.legal_moves))
         
         # Calculate black's moves
         board_copy.turn = chess.BLACK
-        black_moves = list(board_copy.legal_moves)
+        black_moves = len(list(board_copy.legal_moves))
         
         # Restore original turn
         board.turn = original_turn
         
         # Count the difference in moves
-        move_diff = len(white_moves) - len(black_moves)
+        move_diff = white_moves - black_moves
         
         return move_diff * self.MOBILITY_BONUS
     
@@ -696,7 +728,7 @@ class Evaluator:
             board: Current chess position
             
         Returns:
-            int: Score for center control
+            int: Score for center control (positive = white advantage)
         """
         score = 0
         
@@ -723,7 +755,7 @@ class Evaluator:
             board: Current chess position
             
         Returns:
-            int: Score for development
+            int: Score for development (positive = white advantage)
         """
         # Don't evaluate development if too many pieces are off the board
         total_pieces = 0
@@ -746,30 +778,30 @@ class Evaluator:
                 square = chess.square(file, home_rank)
                 piece = board.piece_at(square)
                 if piece and piece.piece_type == chess.KNIGHT and piece.color == color:
-                    score += self.UNDEVELOPED_PIECE_PENALTY if color else -self.UNDEVELOPED_PIECE_PENALTY
+                    score += self.UNDEVELOPED_PIECE_PENALTY if color == chess.WHITE else -self.UNDEVELOPED_PIECE_PENALTY
             
             # Check bishops
             for file in [2, 5]:  # c and f files
                 square = chess.square(file, home_rank)
                 piece = board.piece_at(square)
                 if piece and piece.piece_type == chess.BISHOP and piece.color == color:
-                    score += self.UNDEVELOPED_PIECE_PENALTY if color else -self.UNDEVELOPED_PIECE_PENALTY
+                    score += self.UNDEVELOPED_PIECE_PENALTY if color == chess.WHITE else -self.UNDEVELOPED_PIECE_PENALTY
         
         # Check castling status
         for color in [chess.WHITE, chess.BLACK]:
             king_file = chess.square_file(board.king(color))
             
             # Check if already castled
-            if color == chess.WHITE and king_file in [2, 6]:  # O-O-O or O-O
+            if (color == chess.WHITE and king_file in [2, 6]):  # O-O-O or O-O
                 score += self.CASTLING_BONUS
-            elif color == chess.BLACK and king_file in [2, 6]:
+            elif (color == chess.BLACK and king_file in [2, 6]):
                 score -= self.CASTLING_BONUS
                 
             # Award bonus for each available castling right
             if board.has_kingside_castling_rights(color):
-                score += self.CASTLING_RIGHTS_BONUS if color else -self.CASTLING_RIGHTS_BONUS
+                score += self.CASTLING_RIGHTS_BONUS if color == chess.WHITE else -self.CASTLING_RIGHTS_BONUS
             if board.has_queenside_castling_rights(color):
-                score += self.CASTLING_RIGHTS_BONUS if color else -self.CASTLING_RIGHTS_BONUS
+                score += self.CASTLING_RIGHTS_BONUS if color == chess.WHITE else -self.CASTLING_RIGHTS_BONUS
         
         return score
 
